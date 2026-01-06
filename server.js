@@ -57,7 +57,7 @@ app.use(
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type", "Authorization", "token"],
   })
 );
 
@@ -74,9 +74,11 @@ const authenticate = (req, res, next) => {
   }
 
   try {
-    // Try to get token from cookie first, then from Authorization header
+    // Try to get token from header first, then cookie, then Authorization header
     const token =
-      req.cookies.token || req.headers.authorization?.replace("Bearer ", "");
+      req.headers.token ||
+      req.cookies.token ||
+      req.headers.authorization?.replace("Bearer ", "");
 
     if (!token) {
       return res.status(401).json({

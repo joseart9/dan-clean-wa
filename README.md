@@ -148,20 +148,30 @@ The server will run on port 4000 by default (or the port specified in the `PORT`
 ## Usage
 
 1. **Start the server**: `npm start`
-2. **Get QR code**: Call `GET /connect` with your JWT token (in cookie or Authorization header)
+2. **Get QR code**: Call `GET /connect` with your JWT token in the `token` header
 3. **Scan QR code**: Open WhatsApp on your phone → Settings → Linked Devices → Link a Device, then scan the QR code
-4. **Check health**: Visit `http://localhost:4000/health` to verify connection (no auth required)
-5. **Send messages**: POST to `/send-msg` with `to` and `message` in the body, including your JWT token
+4. **Check health**: Call `GET /health` with your JWT token in the `token` header
+5. **Send messages**: POST to `/send-msg` with `to` and `message` in the body, including your JWT token in the `token` header
 
 ## Authentication
 
 The backend uses JWT authentication shared with your NextJS app:
 
-- **Token Location**: JWT token should be sent either:
-  - In a cookie named `token`
-  - In the `Authorization` header as `Bearer <token>`
+- **Token Location**: JWT token should be sent in one of these ways (checked in order):
+  1. In a `token` header (recommended)
+  2. In a cookie named `token`
+  3. In the `Authorization` header as `Bearer <token>`
 - **Secret**: Must match the `AUTH_SECRET` environment variable (same as NextJS app)
 - **Development Mode**: If `AUTH_SECRET` is not set, authentication is disabled (for local testing only)
+
+### Example Request (with token header - recommended):
+
+```bash
+curl -X POST http://localhost:4000/send-msg \
+  -H "Content-Type: application/json" \
+  -H "token: your-jwt-token" \
+  -d '{"to": "+1234567890", "message": "Hello"}'
+```
 
 ### Example Request (with cookie):
 
