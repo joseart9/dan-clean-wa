@@ -66,10 +66,12 @@ Sends a WhatsApp message to a specified phone number.
 
 ```json
 {
-  "to": "1234567890",
+  "to": "8117858904",
   "message": "Hello from WhatsApp API!"
 }
 ```
+
+**Note:** Phone numbers should be provided without the country code. The API automatically adds Mexico's country code (52) if not present. For example, `8117858904` becomes `528117858904@c.us`.
 
 **Response:**
 
@@ -193,9 +195,18 @@ curl -X POST http://localhost:4000/send-msg \
 
 ## Phone Number Format
 
-The `to` field should be a phone number. The API will automatically format it to WhatsApp's format (e.g., `1234567890@c.us`).
+The `to` field should be a phone number without the country code. The API automatically:
 
-For international numbers, include the country code without the `+` sign or with it (e.g., `551234567890` or `+551234567890`).
+- Adds Mexico's country code (52) if not present
+- Formats it to WhatsApp's format (e.g., `8117858904` → `528117858904@c.us`)
+
+**Examples:**
+
+- Input: `8117858904` → Output: `528117858904@c.us`
+- Input: `528117858904` → Output: `528117858904@c.us` (already has country code)
+- Input: `+528117858904` → Output: `528117858904@c.us` (+ sign is removed)
+
+**Note:** All numbers are assumed to be from Mexico. If you need to send to other countries, include the full international number with country code.
 
 ## Deployment on Railway
 

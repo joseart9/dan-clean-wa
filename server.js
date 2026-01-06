@@ -416,6 +416,12 @@ app.post("/send-msg", authenticate, async (req, res) => {
       });
     }
 
+    // Add Mexico country code (52) if not present
+    // All numbers are from Mexico, so if it doesn't start with 52, add it
+    if (!phoneNumber.startsWith("52")) {
+      phoneNumber = "52" + phoneNumber;
+    }
+
     // Add @c.us suffix for WhatsApp format
     whatsappNumber = phoneNumber + "@c.us";
 
