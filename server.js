@@ -453,22 +453,35 @@ app.post("/send-msg", authenticate, async (req, res) => {
       to: whatsappNumber,
     });
   } catch (error) {
+    // Log full error details
     console.error("Error sending message:", error);
-    console.error("Error details:", {
-      message: error.message,
+    console.error("Error name:", error.name);
+    console.error("Error message:", error.message);
+    console.error("Error stack:", error.stack);
+
+    // Try to extract more details from the error
+    const errorDetails = {
+      name: error.name,
+      message: error.message || "Unknown error",
       stack: error.stack,
       phoneNumber: whatsappNumber || "unknown",
-    });
+      cause: error.cause ? error.cause.message : undefined,
+    };
+    console.error("Error details:", errorDetails);
 
     // Provide more specific error messages
     let errorMessage = "Failed to send message";
     const errorMsg = error.message || "";
+    const errorName = error.name || "";
 
     // Check for session-related errors
     if (
       errorMsg.includes("Session closed") ||
       errorMsg.includes("Target closed") ||
-      errorMsg.includes("Protocol error")
+      errorMsg.includes("Protocol error") ||
+      errorMsg.includes("Target.setDiscoverTargets") ||
+      errorName === "TargetCloseError" ||
+      errorName === "ProtocolError"
     ) {
       // Session expired or connection lost - trigger reconnection
       console.log("Session error detected, triggering reconnection...");
@@ -476,10 +489,23 @@ app.post("/send-msg", authenticate, async (req, res) => {
         reconnectClient();
       }
       errorMessage =
-        "WhatsApp session expired. Reconnecting automatically. Please try again in a few seconds.";
+        "WhatsApp session expired or connection lost. Reconnecting automatically. Please try again in a few seconds.";
     } else if (errorMsg.includes("No LID for user")) {
       errorMessage =
         "The phone number is not registered on WhatsApp or cannot be found. Please verify the number is correct and has WhatsApp installed.";
+    } else if (
+      errorMsg.includes("Evaluation failed") ||
+      errorMsg.includes("ExecutionContext")
+    ) {
+      // Puppeteer execution errors - usually session/connection issues
+      console.log(
+        "Puppeteer execution error detected, triggering reconnection..."
+      );
+      if (!isReconnecting) {
+        reconnectClient();
+      }
+      errorMessage =
+        "WhatsApp connection error. Reconnecting automatically. Please try again in a few seconds.";
     } else if (errorMsg && errorMsg !== "t") {
       errorMessage = errorMsg;
     } else if (errorMsg === "t") {
