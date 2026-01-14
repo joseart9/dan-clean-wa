@@ -1,0 +1,14 @@
+{
+  "watch": ["server.js"],
+  "ext": "js,json",
+  "ignore": [
+    ".wwebjs_auth/**",
+    ".wwebjs_cache/**",
+    "node_modules/**",
+    "*.log"
+  ],
+  "exec": "node server.js",
+  "env": {
+    "NODE_ENV": "development"
+  }
+}

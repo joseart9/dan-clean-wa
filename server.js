@@ -381,7 +381,7 @@ app.post("/send-msg", authenticate, async (req, res) => {
     if (!to || !message) {
       return res.status(400).json({
         status: "error",
-        message: "Missing required fields: to and message are required",
+        message: "Faltan campos requeridos: 'to' y 'message' son obligatorios",
       });
     }
 
@@ -391,13 +391,13 @@ app.post("/send-msg", authenticate, async (req, res) => {
         return res.status(503).json({
           status: "error",
           message:
-            "WhatsApp client is reconnecting. Please try again in a few seconds.",
+            "El cliente de WhatsApp se está reconectando. Por favor intenta de nuevo en unos segundos.",
         });
       }
       return res.status(503).json({
         status: "error",
         message:
-          "WhatsApp client is not ready. Please connect first using /connect endpoint",
+          "El cliente de WhatsApp no está listo. Por favor conéctate primero usando el endpoint /connect",
       });
     }
 
@@ -408,47 +408,81 @@ app.post("/send-msg", authenticate, async (req, res) => {
     // Remove @c.us if already present
     phoneNumber = phoneNumber.replace("@c.us", "");
 
+    // Log original input for debugging
+    console.log("Original phone number input:", to);
+    console.log(
+      "Cleaned phone number:",
+      phoneNumber,
+      "(length:",
+      phoneNumber.length + ")"
+    );
+
     // Ensure phone number is not empty
     if (!phoneNumber || phoneNumber.length < 10) {
       return res.status(400).json({
         status: "error",
-        message: "Invalid phone number format",
+        message:
+          "Formato de número inválido. El número debe tener al menos 10 dígitos.",
       });
     }
 
-    // Add Mexico country code (52) if not present
-    // All numbers are from Mexico, so if it doesn't start with 52, add it
-    if (!phoneNumber.startsWith("52")) {
-      phoneNumber = "52" + phoneNumber;
-    }
-
-    // Add @c.us suffix for WhatsApp format
-    whatsappNumber = phoneNumber + "@c.us";
-
     // Try to get the number ID first (this validates the number is on WhatsApp)
-    // If this fails, we'll still try to send, but with better error handling
+    // This is important to ensure the contact exists before sending
     let numberId = null;
     try {
-      numberId = await client.getNumberId(whatsappNumber);
+      numberId = await client.getNumberId(phoneNumber);
       if (numberId) {
-        // Use the validated number ID (more reliable)
-        whatsappNumber = numberId._serialized;
+        // Check if the serialized ID has the correct format (12 digits + @c.us)
+        const serializedId = numberId._serialized;
+
+        whatsappNumber = serializedId;
+      } else {
+        console.warn("getNumberId returned null for:", whatsappNumber);
+        // Return error early - number is not on WhatsApp
+        return res.status(400).json({
+          status: "error",
+          message: "Este numero no tiene WhatsApp",
+          phoneNumber: whatsappNumber,
+          originalInput: to,
+        });
       }
     } catch (validationError) {
-      // If validation fails, we'll still try to send with the original format
-      // Some numbers might work even if validation fails
-      console.log(
-        "Number validation failed, will try sending with original format:",
+      // If validation fails, the number is not on WhatsApp
+      console.error(
+        "Number validation failed for:",
+        whatsappNumber,
+        "Error:",
         validationError.message
       );
+
+      // Check if it's a "not found" error
+      const validationErrorMsg = validationError.message || "";
+      if (
+        validationErrorMsg.includes("not registered") ||
+        validationErrorMsg.includes("not found") ||
+        validationErrorMsg.includes("No LID") ||
+        validationErrorMsg.includes("LID for user")
+      ) {
+        return res.status(400).json({
+          status: "error",
+          message: "Este numero no tiene WhatsApp",
+          phoneNumber: whatsappNumber,
+          originalInput: to,
+        });
+      }
+
+      // For other validation errors, still try to send (might work)
+      console.log("Validation error, but will attempt to send anyway");
     }
 
     // Send message
-    const result = await client.sendMessage(whatsappNumber, message);
+    const result = await client.sendMessage(whatsappNumber, message, {
+      sendSeen: false,
+    });
 
     res.status(200).json({
       status: "success",
-      message: "Message sent successfully",
+      message: "Mensaje enviado exitosamente",
       messageId: result.id._serialized,
       to: whatsappNumber,
     });
@@ -469,8 +503,8 @@ app.post("/send-msg", authenticate, async (req, res) => {
     };
     console.error("Error details:", errorDetails);
 
-    // Provide more specific error messages
-    let errorMessage = "Failed to send message";
+    // Provide more specific error messages in Spanish
+    let errorMessage = "Error al enviar el mensaje";
     const errorMsg = error.message || "";
     const errorName = error.name || "";
 
@@ -489,10 +523,18 @@ app.post("/send-msg", authenticate, async (req, res) => {
         reconnectClient();
       }
       errorMessage =
-        "WhatsApp session expired or connection lost. Reconnecting automatically. Please try again in a few seconds.";
-    } else if (errorMsg.includes("No LID for user")) {
-      errorMessage =
-        "The phone number is not registered on WhatsApp or cannot be found. Please verify the number is correct and has WhatsApp installed.";
+        "La sesión de WhatsApp expiró o se perdió la conexión. Reconectando automáticamente. Por favor intenta de nuevo en unos segundos.";
+    } else if (
+      errorMsg.includes("No LID for user") ||
+      errorMsg.includes("LID for user")
+    ) {
+      errorMessage = "Este numero no tiene WhatsApp";
+    } else if (
+      errorMsg.includes("markedUnread") ||
+      errorMsg.includes("Cannot read properties of undefined")
+    ) {
+      // Chat/contact not found error - the contact doesn't exist or chat isn't initialized
+      errorMessage = "Este numero no tiene WhatsApp";
     } else if (
       errorMsg.includes("Evaluation failed") ||
       errorMsg.includes("ExecutionContext")
@@ -505,12 +547,20 @@ app.post("/send-msg", authenticate, async (req, res) => {
         reconnectClient();
       }
       errorMessage =
-        "WhatsApp connection error. Reconnecting automatically. Please try again in a few seconds.";
+        "Error de conexión con WhatsApp. Reconectando automáticamente. Por favor intenta de nuevo en unos segundos.";
     } else if (errorMsg && errorMsg !== "t") {
-      errorMessage = errorMsg;
+      // Generic error - try to provide a user-friendly message
+      if (
+        errorMsg.includes("not registered") ||
+        errorMsg.includes("not found")
+      ) {
+        errorMessage = "Este numero no tiene WhatsApp";
+      } else {
+        errorMessage =
+          "Error al enviar el mensaje. Por favor verifica el número e intenta de nuevo.";
+      }
     } else if (errorMsg === "t") {
-      errorMessage =
-        "Invalid phone number or contact not found. Please ensure the phone number is correct and includes the country code.";
+      errorMessage = "Este numero no tiene WhatsApp";
     }
 
     res.status(500).json({
