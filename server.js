@@ -1,32 +1,21 @@
-// Load environment variables from .env file
 require("dotenv").config();
 
 const express = require("express");
-const { Client, LocalAuth } = require("whatsapp-web.js");
-const qrcode = require("qrcode");
-const path = require("path");
-const puppeteer = require("puppeteer");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const jwt = require("jsonwebtoken");
-const fs = require("fs").promises;
+const whatsapp = require("./whatsapp");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
 const AUTH_SECRET = process.env.AUTH_SECRET;
 
 if (!AUTH_SECRET) {
-  console.warn(
-    "WARNING: AUTH_SECRET environment variable is not set. Authentication will be disabled."
-  );
-  console.warn(
-    "WARNING: This should only be used for local development. Set AUTH_SECRET in production!"
-  );
+  console.warn("⚠ AUTH_SECRET not set — authentication disabled (dev mode)");
 } else {
-  console.log("✓ Authentication enabled with AUTH_SECRET");
+  console.log("✓ Authentication enabled");
 }
 
-// CORS configuration
 const allowedOrigins = [
   "https://danclean.vercel.app",
   /^http:\/\/localhost(:\d+)?$/,
@@ -36,24 +25,11 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: function (origin, callback) {
-      // Allow requests with no origin (like mobile apps, Postman, etc.)
       if (!origin) return callback(null, true);
-
-      // Check if origin matches allowed patterns
-      const isAllowed = allowedOrigins.some((allowedOrigin) => {
-        if (typeof allowedOrigin === "string") {
-          return origin === allowedOrigin;
-        } else if (allowedOrigin instanceof RegExp) {
-          return allowedOrigin.test(origin);
-        }
-        return false;
-      });
-
-      if (isAllowed) {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
-      }
+      const isAllowed = allowedOrigins.some((o) =>
+        typeof o === "string" ? origin === o : o.test(origin)
+      );
+      callback(isAllowed ? null : new Error("Not allowed by CORS"), isAllowed);
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -61,20 +37,14 @@ app.use(
   })
 );
 
-// Middleware
 app.use(cookieParser());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Authentication middleware
 const authenticate = (req, res, next) => {
-  // Skip auth if AUTH_SECRET is not set (development mode)
-  if (!AUTH_SECRET) {
-    return next();
-  }
+  if (!AUTH_SECRET) return next();
 
   try {
-    // Try to get token from header first, then cookie, then Authorization header
     const token =
       req.headers.token ||
       req.cookies.token ||
@@ -87,282 +57,87 @@ const authenticate = (req, res, next) => {
       });
     }
 
-    // Verify JWT token
-    const decoded = jwt.verify(token, AUTH_SECRET);
-    req.user = decoded;
+    req.user = jwt.verify(token, AUTH_SECRET);
     next();
   } catch (error) {
-    if (error.name === "TokenExpiredError") {
-      return res.status(401).json({
-        status: "error",
-        message: "Token expired. Please login again.",
-      });
-    } else if (error.name === "JsonWebTokenError") {
-      return res.status(401).json({
-        status: "error",
-        message: "Invalid token. Please login again.",
-      });
-    }
-    return res.status(401).json({
-      status: "error",
-      message: "Authentication failed.",
-    });
+    const message =
+      error.name === "TokenExpiredError"
+        ? "Token expired. Please login again."
+        : error.name === "JsonWebTokenError"
+          ? "Invalid token. Please login again."
+          : "Authentication failed.";
+    return res.status(401).json({ status: "error", message });
   }
 };
 
-// Initialize WhatsApp client
-// Determine if we're on Windows or Linux (for Railway)
-const isWindows = process.platform === "win32";
-const puppeteerArgs = isWindows
-  ? [
-      "--disable-dev-shm-usage",
-      "--disable-accelerated-2d-canvas",
-      "--no-first-run",
-      "--disable-gpu",
-      "--disable-software-rasterizer",
-    ]
-  : [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-accelerated-2d-canvas",
-      "--no-first-run",
-      "--no-zygote",
-      "--single-process",
-      "--disable-gpu",
-    ];
+// --- Routes ---
 
-// Get Chromium executable path from puppeteer
-const chromiumExecutablePath = puppeteer.executablePath();
-
-const client = new Client({
-  authStrategy: new LocalAuth({
-    dataPath: "./.wwebjs_auth",
-  }),
-  puppeteer: {
-    headless: true,
-    executablePath: chromiumExecutablePath,
-    args: puppeteerArgs,
-    timeout: 60000,
-  },
-});
-
-let qrCodeData = null;
-let isReady = false;
-let clientReady = false;
-let isReconnecting = false;
-
-// Event handlers
-client.on("qr", async (qr) => {
-  console.log("QR Code received, generating...");
-  try {
-    // Generate QR code as data URL
-    qrCodeData = await qrcode.toDataURL(qr);
-    console.log("QR Code generated successfully");
-  } catch (err) {
-    console.error("Error generating QR code:", err);
-  }
-});
-
-client.on("ready", () => {
-  console.log("WhatsApp client is ready!");
-  isReady = true;
-  clientReady = true;
-  isReconnecting = false;
-  qrCodeData = null; // Clear QR code once ready
-});
-
-client.on("authenticated", () => {
-  console.log("Client authenticated - Session saved");
-});
-
-client.on("auth_failure", (msg) => {
-  console.error("Authentication failure:", msg);
-  isReady = false;
-  clientReady = false;
-  isReconnecting = false;
-  qrCodeData = null;
-});
-
-client.on("disconnected", (reason) => {
-  console.log("Client disconnected:", reason);
-  isReady = false;
-  clientReady = false;
-  isReconnecting = false;
-  qrCodeData = null;
-
-  // Auto-reconnect on unexpected disconnection
-  if (reason === "NAVIGATION" || reason === "CONNECTION_CLOSED") {
-    console.log("Attempting to reconnect...");
-    reconnectClient();
-  }
-});
-
-// Remote session saved event - handles session refresh
-client.on("remote_session_saved", () => {
-  console.log("Remote session saved - Session refreshed successfully");
-});
-
-// Handle loading screen events
-client.on("loading_screen", (percent, message) => {
-  console.log(`Loading: ${percent}% - ${message}`);
-});
-
-// Initialize client with retry logic
-let initializationAttempts = 0;
-const maxInitAttempts = 3;
-
-const initializeClient = async () => {
-  try {
-    isReconnecting = false;
-    await client.initialize();
-  } catch (err) {
-    initializationAttempts++;
-    console.error(
-      `Error initializing client (attempt ${initializationAttempts}/${maxInitAttempts}):`,
-      err.message
-    );
-
-    if (initializationAttempts < maxInitAttempts) {
-      console.log(`Retrying initialization in 5 seconds...`);
-      setTimeout(() => {
-        initializeClient();
-      }, 5000);
-    } else {
-      console.error(
-        "Failed to initialize client after multiple attempts. Please check your system configuration."
-      );
-    }
-  }
-};
-
-// Reconnect client function
-const reconnectClient = async () => {
-  if (isReconnecting) {
-    console.log("Reconnection already in progress...");
-    return;
-  }
-
-  isReconnecting = true;
-  initializationAttempts = 0;
-
-  try {
-    console.log("Destroying existing client...");
-    await client.destroy();
-  } catch (err) {
-    console.log(
-      "Error destroying client (may not be initialized):",
-      err.message
-    );
-  }
-
-  // Wait a bit before reinitializing
-  setTimeout(() => {
-    console.log("Reinitializing client...");
-    initializeClient();
-  }, 2000);
-};
-
-// Check session health periodically
-setInterval(() => {
-  if (clientReady && !isReconnecting) {
-    // Check if client is still connected
-    client
-      .getState()
-      .then((state) => {
-        if (state === "CONNECTED") {
-          // Session is healthy
-          return;
-        } else {
-          console.log(
-            `Session state changed to: ${state}. Attempting to reconnect...`
-          );
-          reconnectClient();
-        }
-      })
-      .catch((err) => {
-        console.error("Error checking session state:", err.message);
-        // If we can't check state, try to reconnect
-        if (!isReconnecting) {
-          reconnectClient();
-        }
-      });
-  }
-}, 60000); // Check every minute
-
-initializeClient();
-
-// Routes
-
-// Health check endpoint (protected)
 app.get("/health", authenticate, async (req, res) => {
+  const status = whatsapp.getStatus();
   let sessionState = "UNKNOWN";
+
   try {
-    if (clientReady) {
+    const client = whatsapp.getClient();
+    if (status.ready && client) {
       sessionState = await client.getState();
     }
-  } catch (err) {
+  } catch {
     sessionState = "ERROR";
   }
 
-  const status = {
-    status: clientReady ? "ok" : "error",
+  const response = {
+    status: status.ready ? "ok" : "error",
     whatsapp: {
-      ready: clientReady,
-      authenticated: clientReady,
-      hasQr: qrCodeData !== null,
+      ready: status.ready,
+      authenticated: status.ready,
+      hasQr: status.qrCode !== null,
       state: sessionState,
-      reconnecting: isReconnecting,
+      reconnecting: status.reconnecting,
     },
     timestamp: new Date().toISOString(),
   };
 
-  if (clientReady && sessionState === "CONNECTED") {
-    res.status(200).json(status);
-  } else if (qrCodeData) {
-    res.status(200).json({
-      ...status,
-      message: "Waiting for QR code scan",
-    });
-  } else if (isReconnecting) {
-    res.status(503).json({
-      ...status,
-      message: "WhatsApp client is reconnecting",
-    });
+  if (status.ready && sessionState === "CONNECTED") {
+    res.status(200).json(response);
+  } else if (status.qrCode) {
+    res.status(200).json({ ...response, message: "Waiting for QR code scan" });
+  } else if (status.reconnecting) {
+    res
+      .status(503)
+      .json({ ...response, message: "WhatsApp client is reconnecting" });
   } else {
     res.status(503).json({
-      ...status,
+      ...response,
       message: "WhatsApp client not initialized or disconnected",
     });
   }
 });
 
-// Connect endpoint - returns QR code (protected)
 app.get("/connect", authenticate, async (req, res) => {
   try {
-    if (clientReady) {
+    const status = whatsapp.getStatus();
+
+    if (status.ready) {
       return res.status(200).json({
         status: "connected",
         message: "WhatsApp is already connected and ready",
       });
     }
 
-    if (qrCodeData) {
+    if (status.qrCode) {
       return res.status(200).json({
         status: "qr_ready",
-        qr: qrCodeData,
+        qr: status.qrCode,
         message: "Scan this QR code with WhatsApp",
       });
     }
 
-    // If no QR code yet, wait a bit and check again
-    // In production, you might want to implement a polling mechanism
     res.status(202).json({
       status: "generating",
       message: "QR code is being generated, please try again in a few seconds",
     });
   } catch (error) {
-    console.error("Error in /connect endpoint:", error);
+    console.error("Error in /connect:", error);
     res.status(500).json({
       status: "error",
       message: "Failed to generate QR code",
@@ -371,53 +146,30 @@ app.get("/connect", authenticate, async (req, res) => {
   }
 });
 
-// Send message endpoint (protected)
 app.post("/send-msg", authenticate, async (req, res) => {
   let whatsappNumber = null;
   try {
     const { to, message } = req.body;
 
-    // Validation
     if (!to || !message) {
       return res.status(400).json({
         status: "error",
-        message: "Faltan campos requeridos: 'to' y 'message' son obligatorios",
-      });
-    }
-
-    if (!clientReady) {
-      // If client is not ready but we're reconnecting, let user know
-      if (isReconnecting) {
-        return res.status(503).json({
-          status: "error",
-          message:
-            "El cliente de WhatsApp se está reconectando. Por favor intenta de nuevo en unos segundos.",
-        });
-      }
-      return res.status(503).json({
-        status: "error",
         message:
-          "El cliente de WhatsApp no está listo. Por favor conéctate primero usando el endpoint /connect",
+          "Faltan campos requeridos: 'to' y 'message' son obligatorios",
       });
     }
 
-    // Format phone number for WhatsApp
-    // Remove all non-digit characters (including +, spaces, dashes, etc.)
-    let phoneNumber = to.replace(/\D/g, "");
+    const status = whatsapp.getStatus();
+    if (!status.ready) {
+      const msg = status.reconnecting
+        ? "El cliente de WhatsApp se está reconectando. Por favor intenta de nuevo en unos segundos."
+        : "El cliente de WhatsApp no está listo. Por favor conéctate primero usando el endpoint /connect";
+      return res.status(503).json({ status: "error", message: msg });
+    }
 
-    // Remove @c.us if already present
-    phoneNumber = phoneNumber.replace("@c.us", "");
+    const client = whatsapp.getClient();
+    let phoneNumber = to.replace(/\D/g, "").replace("@c.us", "");
 
-    // Log original input for debugging
-    console.log("Original phone number input:", to);
-    console.log(
-      "Cleaned phone number:",
-      phoneNumber,
-      "(length:",
-      phoneNumber.length + ")"
-    );
-
-    // Ensure phone number is not empty
     if (!phoneNumber || phoneNumber.length < 10) {
       return res.status(400).json({
         status: "error",
@@ -426,56 +178,36 @@ app.post("/send-msg", authenticate, async (req, res) => {
       });
     }
 
-    // Try to get the number ID first (this validates the number is on WhatsApp)
-    // This is important to ensure the contact exists before sending
-    let numberId = null;
     try {
-      numberId = await client.getNumberId(phoneNumber);
+      const numberId = await client.getNumberId(phoneNumber);
       if (numberId) {
-        // Check if the serialized ID has the correct format (12 digits + @c.us)
-        const serializedId = numberId._serialized;
-
-        whatsappNumber = serializedId;
+        whatsappNumber = numberId._serialized;
       } else {
-        console.warn("getNumberId returned null for:", whatsappNumber);
-        // Return error early - number is not on WhatsApp
         return res.status(400).json({
           status: "error",
           message: "Este numero no tiene WhatsApp",
-          phoneNumber: whatsappNumber,
+          phoneNumber: phoneNumber,
           originalInput: to,
         });
       }
     } catch (validationError) {
-      // If validation fails, the number is not on WhatsApp
-      console.error(
-        "Number validation failed for:",
-        whatsappNumber,
-        "Error:",
-        validationError.message
-      );
-
-      // Check if it's a "not found" error
-      const validationErrorMsg = validationError.message || "";
+      const msg = validationError.message || "";
       if (
-        validationErrorMsg.includes("not registered") ||
-        validationErrorMsg.includes("not found") ||
-        validationErrorMsg.includes("No LID") ||
-        validationErrorMsg.includes("LID for user")
+        msg.includes("not registered") ||
+        msg.includes("not found") ||
+        msg.includes("No LID") ||
+        msg.includes("LID for user")
       ) {
         return res.status(400).json({
           status: "error",
           message: "Este numero no tiene WhatsApp",
-          phoneNumber: whatsappNumber,
+          phoneNumber: phoneNumber,
           originalInput: to,
         });
       }
-
-      // For other validation errors, still try to send (might work)
-      console.log("Validation error, but will attempt to send anyway");
+      console.log("Validation error, attempting send anyway");
     }
 
-    // Send message
     const result = await client.sendMessage(whatsappNumber, message, {
       sendSeen: false,
     });
@@ -487,28 +219,12 @@ app.post("/send-msg", authenticate, async (req, res) => {
       to: whatsappNumber,
     });
   } catch (error) {
-    // Log full error details
-    console.error("Error sending message:", error);
-    console.error("Error name:", error.name);
-    console.error("Error message:", error.message);
-    console.error("Error stack:", error.stack);
+    console.error("Error sending message:", error.message);
 
-    // Try to extract more details from the error
-    const errorDetails = {
-      name: error.name,
-      message: error.message || "Unknown error",
-      stack: error.stack,
-      phoneNumber: whatsappNumber || "unknown",
-      cause: error.cause ? error.cause.message : undefined,
-    };
-    console.error("Error details:", errorDetails);
-
-    // Provide more specific error messages in Spanish
-    let errorMessage = "Error al enviar el mensaje";
     const errorMsg = error.message || "";
     const errorName = error.name || "";
+    let errorMessage = "Error al enviar el mensaje";
 
-    // Check for session-related errors
     if (
       errorMsg.includes("Session closed") ||
       errorMsg.includes("Target closed") ||
@@ -517,13 +233,13 @@ app.post("/send-msg", authenticate, async (req, res) => {
       errorName === "TargetCloseError" ||
       errorName === "ProtocolError"
     ) {
-      // Session expired or connection lost - trigger reconnection
-      console.log("Session error detected, triggering reconnection...");
-      if (!isReconnecting) {
-        reconnectClient();
+      try {
+        whatsapp.reconnect();
+      } catch {
+        // Already reconnecting
       }
       errorMessage =
-        "La sesión de WhatsApp expiró o se perdió la conexión. Reconectando automáticamente. Por favor intenta de nuevo en unos segundos.";
+        "La sesión de WhatsApp expiró o se perdió la conexión. Reconectando automáticamente.";
     } else if (
       errorMsg.includes("No LID for user") ||
       errorMsg.includes("LID for user")
@@ -533,34 +249,28 @@ app.post("/send-msg", authenticate, async (req, res) => {
       errorMsg.includes("markedUnread") ||
       errorMsg.includes("Cannot read properties of undefined")
     ) {
-      // Chat/contact not found error - the contact doesn't exist or chat isn't initialized
       errorMessage = "Este numero no tiene WhatsApp";
     } else if (
       errorMsg.includes("Evaluation failed") ||
       errorMsg.includes("ExecutionContext")
     ) {
-      // Puppeteer execution errors - usually session/connection issues
-      console.log(
-        "Puppeteer execution error detected, triggering reconnection..."
-      );
-      if (!isReconnecting) {
-        reconnectClient();
+      try {
+        whatsapp.reconnect();
+      } catch {
+        // Already reconnecting
       }
       errorMessage =
-        "Error de conexión con WhatsApp. Reconectando automáticamente. Por favor intenta de nuevo en unos segundos.";
-    } else if (errorMsg && errorMsg !== "t") {
-      // Generic error - try to provide a user-friendly message
-      if (
-        errorMsg.includes("not registered") ||
-        errorMsg.includes("not found")
-      ) {
-        errorMessage = "Este numero no tiene WhatsApp";
-      } else {
-        errorMessage =
-          "Error al enviar el mensaje. Por favor verifica el número e intenta de nuevo.";
-      }
+        "Error de conexión con WhatsApp. Reconectando automáticamente.";
     } else if (errorMsg === "t") {
       errorMessage = "Este numero no tiene WhatsApp";
+    } else if (
+      errorMsg.includes("not registered") ||
+      errorMsg.includes("not found")
+    ) {
+      errorMessage = "Este numero no tiene WhatsApp";
+    } else {
+      errorMessage =
+        "Error al enviar el mensaje. Por favor verifica el número e intenta de nuevo.";
     }
 
     res.status(500).json({
@@ -572,26 +282,17 @@ app.post("/send-msg", authenticate, async (req, res) => {
   }
 });
 
-// Reconnect endpoint (protected) - manually trigger reconnection
 app.post("/reconnect", authenticate, async (req, res) => {
   try {
-    if (isReconnecting) {
-      return res.status(409).json({
-        status: "error",
-        message: "Reconnection already in progress",
-      });
-    }
-
-    console.log("Manual reconnection triggered by user");
-    reconnectClient();
-
+    await whatsapp.reconnect();
     res.status(200).json({
       status: "success",
-      message:
-        "Reconnection initiated. Please check /health endpoint for status.",
+      message: "Reconnection initiated. Check /health for status.",
     });
   } catch (error) {
-    console.error("Error in /reconnect endpoint:", error);
+    if (error.message === "Reconnection already in progress") {
+      return res.status(409).json({ status: "error", message: error.message });
+    }
     res.status(500).json({
       status: "error",
       message: "Failed to initiate reconnection",
@@ -600,57 +301,16 @@ app.post("/reconnect", authenticate, async (req, res) => {
   }
 });
 
-// Logout endpoint (protected) - destroys session and clears auth data
 app.post("/logout", authenticate, async (req, res) => {
   try {
-    console.log("Logout requested - destroying WhatsApp session...");
-
-    // Reset state variables
-    isReconnecting = true;
-    clientReady = false;
-    isReady = false;
-    qrCodeData = null;
-
-    // Destroy the client
-    try {
-      await client.destroy();
-      console.log("WhatsApp client destroyed");
-    } catch (destroyError) {
-      console.log(
-        "Error destroying client (may not be initialized):",
-        destroyError.message
-      );
-    }
-
-    // Delete session data directory
-    const sessionPath = path.join(process.cwd(), ".wwebjs_auth");
-    try {
-      await fs.rm(sessionPath, { recursive: true, force: true });
-      console.log("Session data deleted successfully");
-    } catch (deleteError) {
-      // If directory doesn't exist, that's fine
-      if (deleteError.code !== "ENOENT") {
-        console.error("Error deleting session data:", deleteError.message);
-      }
-    }
-
-    // Reset initialization attempts
-    initializationAttempts = 0;
-
-    // Reinitialize client to generate new QR code
-    setTimeout(() => {
-      console.log("Reinitializing client for new session...");
-      isReconnecting = false;
-      initializeClient();
-    }, 2000);
-
+    await whatsapp.logout();
     res.status(200).json({
       status: "success",
       message:
-        "Logged out successfully. Session cleared. Please scan QR code again via /connect endpoint.",
+        "Logged out. Session cleared. Scan QR code again via /connect.",
     });
   } catch (error) {
-    console.error("Error in /logout endpoint:", error);
+    console.error("Error in /logout:", error);
     res.status(500).json({
       status: "error",
       message: "Failed to logout",
@@ -659,40 +319,34 @@ app.post("/logout", authenticate, async (req, res) => {
   }
 });
 
-// Root endpoint
 app.get("/", (req, res) => {
   res.json({
     message: "WhatsApp Web API",
     endpoints: {
-      health: "GET /health - Check WhatsApp connection status (protected)",
-      connect: "GET /connect - Get QR code for WhatsApp connection (protected)",
-      sendMsg:
-        "POST /send-msg - Send a WhatsApp message (protected, body: { to: string, message: string })",
-      reconnect:
-        "POST /reconnect - Manually trigger WhatsApp reconnection (protected)",
-      logout:
-        "POST /logout - Destroy WhatsApp session and clear auth data (protected)",
+      health: "GET /health",
+      connect: "GET /connect",
+      sendMsg: "POST /send-msg",
+      reconnect: "POST /reconnect",
+      logout: "POST /logout",
     },
-    authentication: AUTH_SECRET ? "Enabled" : "Disabled (development mode)",
+    authentication: AUTH_SECRET ? "Enabled" : "Disabled (dev mode)",
   });
 });
 
-// Start server
+// Start server immediately so health checks work during init
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Connect: http://localhost:${PORT}/connect`);
+  console.log(`✓ Server running on port ${PORT}`);
 });
 
-// Graceful shutdown
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, closing server...");
-  client.destroy();
-  process.exit(0);
+whatsapp.initialize().catch((err) => {
+  console.error("WhatsApp initialization error:", err.message);
 });
 
-process.on("SIGINT", () => {
-  console.log("SIGINT received, closing server...");
-  client.destroy();
+async function gracefulShutdown(signal) {
+  console.log(`${signal} received, shutting down...`);
+  await whatsapp.shutdown();
   process.exit(0);
-});
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

@@ -1,5 +1,5 @@
 {
-  "watch": ["server.js"],
+  "watch": ["server.js", "whatsapp.js"],
   "ext": "js,json",
   "ignore": [
     ".wwebjs_auth/**",
