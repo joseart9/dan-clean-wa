@@ -39,6 +39,12 @@ const PUPPETEER_ARGS = [
   "--disable-client-side-phishing-detection",
   "--disable-component-update",
   "--disable-domain-reliability",
+  "--disable-renderer-backgrounding",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-ipc-flooding-protection",
+  "--disable-breakpad",
+  "--disable-features=TranslateUI,BlinkGenPropertyTrees,AudioServiceOutOfProcess",
+  "--js-flags=--max-old-space-size=256",
 ];
 
 let client = null;
@@ -49,19 +55,29 @@ let isReconnecting = false;
 let initAttempts = 0;
 let reconnectTimer = null;
 let healthInterval = null;
+let consecutiveHealthFailures = 0;
 
 const MAX_INIT_ATTEMPTS = 3;
 const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000;
+const HEALTH_FAILURE_THRESHOLD = 3;
+
+const TERMINAL_STATES = new Set([
+  "UNPAIRED",
+  "UNPAIRED_IDLE",
+  "DEPRECATED_VERSION",
+  "TOS_BLOCK",
+  "SMB_TOS_BLOCK",
+]);
 
 function killZombieChrome() {
   if (process.platform === "win32") return;
   try {
-    execSync("pkill -9 -f '(chromium|chrome)( |$)' 2>/dev/null || true", {
-      stdio: "ignore",
-      timeout: 5000,
-    });
+    execSync(
+      "pgrep -f '(chromium|chrome) ' | xargs -r kill -9 2>/dev/null || true",
+      { stdio: "ignore", timeout: 5000 }
+    );
   } catch {
-    // Ignore — no matching processes or pkill not available
+    // No matching processes or command not available
   }
 }
 
@@ -70,7 +86,7 @@ function createAuthStrategy() {
     return new RemoteAuth({
       store,
       clientId: "dan-clean-wa",
-      backupSyncIntervalMs: 300000,
+      backupSyncIntervalMs: 900000,
     });
   }
   return new LocalAuth({ dataPath: "./.wwebjs_auth" });
@@ -83,7 +99,7 @@ function createClient() {
       headless: true,
       executablePath: CHROME_PATH,
       args: PUPPETEER_ARGS,
-      timeout: 120000,
+      timeout: 180000,
     },
   });
 
@@ -102,6 +118,7 @@ function createClient() {
     isReconnecting = false;
     qrCodeData = null;
     initAttempts = 0;
+    consecutiveHealthFailures = 0;
   });
 
   newClient.on("authenticated", () => {
@@ -132,6 +149,11 @@ function createClient() {
 
   newClient.on("change_state", (state) => {
     console.log("Connection state:", state);
+    if (TERMINAL_STATES.has(state) && clientReady) {
+      console.log(`Terminal state detected: ${state}, reconnecting...`);
+      clientReady = false;
+      scheduleReconnect();
+    }
   });
 
   return newClient;
@@ -168,7 +190,8 @@ function scheduleReconnect() {
   if (isReconnecting || reconnectTimer) return;
 
   isReconnecting = true;
-  console.log("Scheduling reconnect in 5s...");
+  consecutiveHealthFailures = 0;
+  console.log("Scheduling reconnect in 10s...");
 
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
@@ -184,9 +207,9 @@ function scheduleReconnect() {
     }
 
     killZombieChrome();
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 3000));
     initializeClient();
-  }, 5000);
+  }, 10000);
 }
 
 function healthCheck() {
@@ -195,14 +218,45 @@ function healthCheck() {
   client
     .getState()
     .then((state) => {
-      if (state !== "CONNECTED") {
-        console.log(`Health check: state=${state}, reconnecting...`);
+      if (state === "CONNECTED") {
+        if (consecutiveHealthFailures > 0) {
+          console.log(
+            `Health check recovered after ${consecutiveHealthFailures} failure(s)`
+          );
+        }
+        consecutiveHealthFailures = 0;
+        return;
+      }
+
+      consecutiveHealthFailures++;
+      console.log(
+        `Health check: state=${state} (${consecutiveHealthFailures}/${HEALTH_FAILURE_THRESHOLD})`
+      );
+
+      if (TERMINAL_STATES.has(state)) {
+        consecutiveHealthFailures = 0;
+        scheduleReconnect();
+      } else if (consecutiveHealthFailures >= HEALTH_FAILURE_THRESHOLD) {
+        console.log("Health check threshold reached, reconnecting...");
+        consecutiveHealthFailures = 0;
         scheduleReconnect();
       }
     })
     .catch((err) => {
-      console.error("Health check error:", err.message);
-      if (!isReconnecting) scheduleReconnect();
+      consecutiveHealthFailures++;
+      console.error(
+        `Health check error (${consecutiveHealthFailures}/${HEALTH_FAILURE_THRESHOLD}):`,
+        err.message
+      );
+
+      if (
+        consecutiveHealthFailures >= HEALTH_FAILURE_THRESHOLD &&
+        !isReconnecting
+      ) {
+        console.log("Health check threshold reached, reconnecting...");
+        consecutiveHealthFailures = 0;
+        scheduleReconnect();
+      }
     });
 }
 
