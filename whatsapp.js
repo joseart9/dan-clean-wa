@@ -57,6 +57,7 @@ let initAttempts = 0;
 let reconnectTimer = null;
 let healthInterval = null;
 let consecutiveHealthFailures = 0;
+let sessionWipedThisCycle = false;
 
 const MAX_INIT_ATTEMPTS = 3;
 const HEALTH_CHECK_INTERVAL = 5 * 60 * 1000;
@@ -151,6 +152,7 @@ function createClient() {
     qrCodeData = null;
     initAttempts = 0;
     consecutiveHealthFailures = 0;
+    sessionWipedThisCycle = false;
   });
 
   newClient.on("authenticated", () => {
@@ -187,6 +189,15 @@ function createClient() {
   return newClient;
 }
 
+async function wipeSessionData() {
+  try {
+    await fs.rm(SESSION_DATA_PATH, { recursive: true, force: true });
+    await fs.mkdir(SESSION_DATA_PATH, { recursive: true });
+  } catch (err) {
+    console.error(`Failed to wipe session data: ${err.message}`);
+  }
+}
+
 async function initializeClient() {
   isReconnecting = false;
   killZombieChrome();
@@ -202,15 +213,38 @@ async function initializeClient() {
       `Error initializing (attempt ${initAttempts}/${MAX_INIT_ATTEMPTS}):`,
       err.message
     );
+
+    if (client) {
+      try {
+        await client.destroy();
+      } catch {
+        // Already broken
+      }
+      client = null;
+    }
     killZombieChrome();
 
     if (initAttempts < MAX_INIT_ATTEMPTS) {
       const delay = 5000 * Math.pow(2, initAttempts - 1);
       console.log(`Retrying in ${delay / 1000}s...`);
       setTimeout(initializeClient, delay);
-    } else {
-      console.error("Failed to initialize after all attempts.");
+    } else if (!sessionWipedThisCycle) {
+      console.error(
+        "✗ All init attempts failed. Session profile is likely corrupted " +
+          "(common after ungraceful container shutdown). Wiping session " +
+          "and retrying with a fresh slate. A new QR scan will be required."
+      );
+      sessionWipedThisCycle = true;
       initAttempts = 0;
+      await wipeSessionData();
+      setTimeout(initializeClient, 2000);
+    } else {
+      console.error(
+        "✗ Init failed even after wiping session. Giving up. " +
+          "Manual intervention required (POST /logout or redeploy)."
+      );
+      initAttempts = 0;
+      sessionWipedThisCycle = false;
     }
   }
 }
