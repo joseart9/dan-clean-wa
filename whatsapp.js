@@ -93,6 +93,34 @@ async function ensureSessionDir() {
   }
 }
 
+// Chromium writes SingletonLock/Cookie/Socket files into the user-data-dir
+// containing the host PID + hostname. On a containerized redeploy the
+// hostname changes, so Chromium refuses to reuse the profile. Since this
+// service only ever runs one Chromium against this volume, it is safe to
+// clear stale locks at startup.
+async function cleanupSessionLocks() {
+  const sessionDir = path.join(SESSION_DATA_PATH, `session-${CLIENT_ID}`);
+  const lockFiles = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
+  let removed = 0;
+
+  await Promise.all(
+    lockFiles.map(async (file) => {
+      try {
+        await fs.unlink(path.join(sessionDir, file));
+        removed++;
+      } catch (err) {
+        if (err.code !== "ENOENT") {
+          console.warn(`Could not remove ${file}: ${err.message}`);
+        }
+      }
+    })
+  );
+
+  if (removed > 0) {
+    console.log(`Cleared ${removed} stale Chromium lock file(s)`);
+  }
+}
+
 function createClient() {
   const newClient = new Client({
     authStrategy: new LocalAuth({
@@ -162,6 +190,7 @@ function createClient() {
 async function initializeClient() {
   isReconnecting = false;
   killZombieChrome();
+  await cleanupSessionLocks();
   await new Promise((r) => setTimeout(r, 1000));
 
   try {
