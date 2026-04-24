@@ -210,44 +210,61 @@ The `to` field should be a phone number without the country code. The API automa
 
 ## Deployment on Railway
 
+### IMPORTANT: Mount a persistent volume for session data
+
+Railway containers have **ephemeral filesystems by default** — every deploy/restart wipes `.wwebjs_auth/`, forcing a new QR scan and (over time) causing WhatsApp to invalidate the session. To keep the WhatsApp client logged in for months, mount a Railway Volume:
+
 1. Push your code to a Git repository
-2. Create a new project on Railway
-3. Connect your repository
-4. Railway will automatically detect Node.js and install dependencies
-5. The server will start automatically using the `start` script
+2. Create a new project on Railway and connect your repository
+3. In the service settings, go to **Volumes** → **New Volume**
+4. Set the **mount path** to `/app/.wwebjs_auth`
+5. Redeploy the service
 
-**Note**: The WhatsApp session data (`.wwebjs_auth/`) will persist between deployments on Railway, so you won't need to scan the QR code again unless the session expires.
+That's it. The app auto-detects the volume via Railway's `RAILWAY_VOLUME_MOUNT_PATH` env var and stores all WhatsApp session files there. Sessions now survive every deploy, restart, OOM, and platform maintenance event.
 
-## Environment Variables
+If you ever see this warning in logs, your volume is not mounted correctly:
+
+```
+⚠ Running on Railway WITHOUT a persistent volume mounted...
+```
+
+### Environment Variables
 
 - `PORT` - Server port (default: 4000)
 - `AUTH_SECRET` - JWT secret key for authentication (must match NextJS app secret). If not set, authentication is disabled (development mode only).
+- `WWEBJS_DATA_PATH` - (Optional) Override the WhatsApp session storage directory. On Railway, `RAILWAY_VOLUME_MOUNT_PATH` is used automatically when a volume is attached.
 
 ## Session Management
 
-The backend includes automatic session management:
+The backend uses **`LocalAuth`** from `whatsapp-web.js`, which stores the WhatsApp session as a real Chromium profile on disk. This is the most reliable session strategy and the one officially recommended by `whatsapp-web.js`.
 
-- **Persistent Sessions**: WhatsApp session is stored in `.wwebjs_auth/` directory and persists between server restarts
+- **Persistent Sessions**: Stored at `RAILWAY_VOLUME_MOUNT_PATH` (Railway) or `./.wwebjs_auth` (local dev)
+- **Always-in-sync tokens**: Unlike `RemoteAuth`, there is no backup interval — every WhatsApp token rotation is written to disk immediately, so restored sessions are never stale
 - **Automatic Reconnection**: If the session disconnects unexpectedly, the backend automatically attempts to reconnect
-- **Session Refresh**: The backend listens for session refresh events and handles them automatically
-- **Health Monitoring**: Periodic health checks ensure the session stays active
+- **Health Monitoring**: Periodic health checks (every 5 min) ensure the session stays active
 - **Manual Reconnection**: Use the `/reconnect` endpoint to manually trigger reconnection if needed
 
 ### Session Lifecycle
 
 1. **Initial Connection**: Scan QR code once via `/connect` endpoint
-2. **Session Saved**: Session is automatically saved to `.wwebjs_auth/` directory
-3. **Automatic Reconnection**: If disconnected, the backend automatically reconnects using saved session
-4. **Session Refresh**: WhatsApp Web.js handles session refresh automatically
-5. **Re-authentication**: Only required if session is completely invalidated (rare)
+2. **Session Saved**: Chromium writes the session profile to the data path on every change
+3. **Automatic Reconnection**: If disconnected, the backend automatically reconnects using the saved session
+4. **Re-authentication**: Only required if WhatsApp itself invalidates the device (rare — typically months) or you call `/logout`
+
+### Why not MongoDB / RemoteAuth?
+
+This project previously used `wwebjs-mongo` + `RemoteAuth` to back sessions to MongoDB. That strategy was removed because:
+
+- `RemoteAuth` only syncs to the remote store on an interval (default 5–15 min). On every container restart, the restored session can be up to one interval **stale**, and after a few stale restores WhatsApp force-logs-out the device. This caused logouts every 2–3 days.
+- `wwebjs-mongo@1.1.0` has well-documented unresolved bugs around zip compression/extraction (see issues [#2631](https://github.com/wwebjs/whatsapp-web.js/issues/2631), [#2667](https://github.com/wwebjs/whatsapp-web.js/issues/2667), [#5781](https://github.com/wwebjs/whatsapp-web.js/issues/5781)).
+- Railway natively supports persistent volumes, which makes `LocalAuth` strictly better here.
 
 ## Notes
 
-- The WhatsApp session is stored in `.wwebjs_auth/` directory
-- Once authenticated, the session persists between deployments and server restarts
+- The WhatsApp session is stored at `RAILWAY_VOLUME_MOUNT_PATH` on Railway, or `./.wwebjs_auth` locally
+- Once authenticated, the session persists across deploys and restarts (when a Railway Volume is mounted)
 - The QR code is only available when the client is not authenticated
 - Automatic reconnection means you rarely need to scan the QR code again
-- Session data persists on Railway between deployments (ephemeral storage)
 
 ## License
 

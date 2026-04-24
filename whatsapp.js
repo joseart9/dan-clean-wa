@@ -1,12 +1,15 @@
-const { Client, RemoteAuth, LocalAuth } = require("whatsapp-web.js");
-const { MongoStore } = require("wwebjs-mongo");
-const mongoose = require("mongoose");
+const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode");
 const { execSync } = require("child_process");
 const fs = require("fs").promises;
 const path = require("path");
 
-const MONGODB_URI = process.env.MONGODB_URI;
+const SESSION_DATA_PATH =
+  process.env.RAILWAY_VOLUME_MOUNT_PATH ||
+  process.env.WWEBJS_DATA_PATH ||
+  path.join(process.cwd(), ".wwebjs_auth");
+
+const CLIENT_ID = "dan-clean-wa";
 
 const CHROME_PATH =
   process.env.PUPPETEER_EXECUTABLE_PATH ||
@@ -44,11 +47,9 @@ const PUPPETEER_ARGS = [
   "--disable-ipc-flooding-protection",
   "--disable-breakpad",
   "--disable-features=TranslateUI,BlinkGenPropertyTrees,AudioServiceOutOfProcess",
-  "--js-flags=--max-old-space-size=256",
 ];
 
 let client = null;
-let store = null;
 let qrCodeData = null;
 let clientReady = false;
 let isReconnecting = false;
@@ -81,20 +82,23 @@ function killZombieChrome() {
   }
 }
 
-function createAuthStrategy() {
-  if (store) {
-    return new RemoteAuth({
-      store,
-      clientId: "dan-clean-wa",
-      backupSyncIntervalMs: 900000,
-    });
+async function ensureSessionDir() {
+  try {
+    await fs.mkdir(SESSION_DATA_PATH, { recursive: true });
+  } catch (err) {
+    console.error(
+      `Failed to ensure session dir at ${SESSION_DATA_PATH}:`,
+      err.message
+    );
   }
-  return new LocalAuth({ dataPath: "./.wwebjs_auth" });
 }
 
 function createClient() {
   const newClient = new Client({
-    authStrategy: createAuthStrategy(),
+    authStrategy: new LocalAuth({
+      clientId: CLIENT_ID,
+      dataPath: SESSION_DATA_PATH,
+    }),
     puppeteer: {
       headless: true,
       executablePath: CHROME_PATH,
@@ -122,11 +126,7 @@ function createClient() {
   });
 
   newClient.on("authenticated", () => {
-    console.log("✓ Client authenticated");
-  });
-
-  newClient.on("remote_session_saved", () => {
-    console.log("✓ Session backed up to MongoDB");
+    console.log("✓ Client authenticated (session saved locally)");
   });
 
   newClient.on("auth_failure", (msg) => {
@@ -261,17 +261,19 @@ function healthCheck() {
 }
 
 async function initialize() {
-  if (MONGODB_URI) {
-    await mongoose.connect(MONGODB_URI, { dbName: "dan-clean-wa" });
-    console.log("✓ Connected to MongoDB");
-    store = new MongoStore({ mongoose });
-    console.log("✓ MongoStore ready");
-  } else {
+  console.log(`✓ Session data path: ${SESSION_DATA_PATH}`);
+  if (
+    !process.env.RAILWAY_VOLUME_MOUNT_PATH &&
+    process.env.RAILWAY_ENVIRONMENT
+  ) {
     console.warn(
-      "⚠ MONGODB_URI not set — using LocalAuth (sessions won't survive restarts)"
+      "⚠ Running on Railway WITHOUT a persistent volume mounted. " +
+        "Sessions will NOT survive deploys/restarts. " +
+        "Mount a volume at /app/.wwebjs_auth to fix this."
     );
   }
 
+  await ensureSessionDir();
   await initializeClient();
   healthInterval = setInterval(healthCheck, HEALTH_CHECK_INTERVAL);
 }
@@ -317,10 +319,7 @@ async function logout() {
   killZombieChrome();
 
   try {
-    await fs.rm(path.join(process.cwd(), ".wwebjs_auth"), {
-      recursive: true,
-      force: true,
-    });
+    await fs.rm(SESSION_DATA_PATH, { recursive: true, force: true });
   } catch {
     // Ignore
   }
@@ -343,10 +342,6 @@ async function shutdown() {
   }
 
   killZombieChrome();
-
-  if (mongoose.connection.readyState === 1) {
-    await mongoose.disconnect();
-  }
 }
 
 module.exports = {
